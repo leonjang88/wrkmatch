@@ -1,6 +1,7 @@
 from __future__ import annotations
 import io
 import re
+import sqlite3
 from pathlib import Path
 import pandas as pd
 
@@ -84,3 +85,82 @@ def read_connections(file_or_path) -> pd.DataFrame:
     df["Company"] = df["Company"].fillna("").astype(str)
     df = df[df["Company"].str.strip() != ""].copy()
     return df
+
+
+def connections_to_contacts(df: pd.DataFrame) -> list[dict]:
+    """Converts a read_connections() DataFrame into contact dicts for db.upsert_contacts.
+
+    One dict per row with keys first_name, last_name, company, position, connected_on.
+    - first_name/last_name/company are always strings (never None, never "nan")
+    - position/connected_on may be None when absent/NaN but never the literal "nan" string
+    - Empty df returns empty list.
+    """
+    if df.empty:
+        return []
+
+    contacts = []
+    for _, row in df.iterrows():
+        # Required fields: always strings, never None or NaN
+        first_name = row.get("First Name", "")
+        if pd.isna(first_name):
+            first_name = ""
+        first_name = str(first_name).strip()
+
+        last_name = row.get("Last Name", "")
+        if pd.isna(last_name):
+            last_name = ""
+        last_name = str(last_name).strip()
+
+        company = row.get("Company", "")
+        if pd.isna(company):
+            company = ""
+        company = str(company).strip()
+
+        # Optional fields: None when absent or NaN, never the string "nan"
+        position = row.get("Position")
+        if pd.isna(position) or position == "":
+            position = None
+        else:
+            position = str(position).strip()
+            if not position:
+                position = None
+
+        connected_on = row.get("Connected On")
+        if pd.isna(connected_on) or connected_on == "":
+            connected_on = None
+        else:
+            connected_on = str(connected_on).strip()
+            if not connected_on:
+                connected_on = None
+
+        contact = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "company": company,
+            "position": position,
+            "connected_on": connected_on,
+        }
+        contacts.append(contact)
+
+    return contacts
+
+
+def load_csvs_to_db(conn: sqlite3.Connection, sources: dict[str, str]) -> dict:
+    """Load multiple CSV files into the database.
+
+    sources maps a source label -> CSV file path.
+    For each entry: read_connections → connections_to_contacts → db.upsert_contacts.
+    Returns {label: {"rows": N, "inserted": M}, ...} where N is total rows from CSV
+    and M is newly inserted (idempotent).
+    Empty sources dict returns {}.
+    """
+    from wrkmatch.db import upsert_contacts
+
+    result = {}
+    for label, csv_path in sources.items():
+        df = read_connections(csv_path)
+        contacts = connections_to_contacts(df)
+        inserted = upsert_contacts(conn, contacts, source=label)
+        result[label] = {"rows": len(contacts), "inserted": inserted}
+
+    return result
