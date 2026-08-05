@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime as _dt
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional, Union, List
 
@@ -129,4 +130,94 @@ def recruitee_jobs(slug: str) -> List[Job]:
             ))
     return jobs
 
-ATS_FUNCS = [greenhouse_jobs, lever_jobs, ashby_jobs, workable_jobs, recruitee_jobs]
+
+def smartrecruiters_jobs(slug: str) -> List[Job]:
+    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+    data = _get_json(url)
+    jobs: List[Job] = []
+    if isinstance(data, dict) and isinstance(data.get("content"), list):
+        for j in data["content"]:
+            jobs.append(Job(
+                company=slug,
+                source="smartrecruiters",
+                title=j.get("name", ""),
+                location=(j.get("location") or {}).get("city", ""),
+                department=(j.get("function") or {}).get("label", ""),
+                url=f"https://jobs.smartrecruiters.com/{slug}/{j.get('id', '')}",
+                posted_at=_coerce_iso(j.get("releasedDate")),
+            ))
+    return jobs
+
+
+def personio_jobs(slug: str) -> List[Job]:
+    url = f"https://{slug}.jobs.personio.de/xml?language=en"
+    jobs: List[Job] = []
+    try:
+        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=6)
+        if r.status_code == 200:
+            root = ET.fromstring(r.text)
+            positions = root.findall("position")
+            for pos in positions:
+                job_id = pos.findtext("id", "")
+                name = pos.findtext("name", "")
+                office = pos.findtext("office", "")
+                department = pos.findtext("department", "")
+                jobs.append(Job(
+                    company=slug,
+                    source="personio",
+                    title=name,
+                    location=office,
+                    department=department,
+                    url=f"https://{slug}.jobs.personio.de/job/{job_id}?language=en",
+                    posted_at=None,
+                ))
+    except (requests.RequestException, ET.ParseError):
+        return []
+    return jobs
+
+def workday_jobs(slug: str) -> List[Job]:
+    hosts = ["wd1", "wd2", "wd3", "wd5"]
+    sites = [slug, "External", "Careers"]
+    payload = {"limit": 20, "offset": 0, "searchText": ""}
+    for host in hosts:
+        for site in sites:
+            url = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}/jobs"
+            try:
+                r = requests.post(url, json=payload, headers=DEFAULT_HEADERS, timeout=6)
+            except requests.RequestException:
+                continue
+            if r.status_code != 200:
+                continue
+            try:
+                data = r.json()
+            except ValueError:
+                continue
+            postings = data.get("jobPostings") if isinstance(data, dict) else None
+            if not isinstance(postings, list) or not postings:
+                continue
+            jobs: List[Job] = []
+            for p in postings:
+                external_path = p.get("externalPath", "")
+                jobs.append(Job(
+                    company=slug,
+                    source="workday",
+                    title=p.get("title", ""),
+                    location=p.get("locationsText", ""),
+                    department="",
+                    url=f"https://{slug}.{host}.myworkdayjobs.com/en-US/{site}{external_path}",
+                    posted_at=_coerce_iso(p.get("postedOn")),
+                ))
+            return jobs
+    return []
+
+
+ATS_FUNCS = [
+    greenhouse_jobs,
+    lever_jobs,
+    ashby_jobs,
+    workable_jobs,
+    recruitee_jobs,
+    smartrecruiters_jobs,
+    workday_jobs,
+    personio_jobs,
+]
