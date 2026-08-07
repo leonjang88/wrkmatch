@@ -202,7 +202,8 @@
     const hiddenCount = all.length - visible.length;
     const shown = state.showHiddenCompanies ? all : visible;
 
-    let html = `<div class="company-list">${shown.map(companyCardHtml).join('')}</div>`;
+    let html = `<div class="score-legend">Score = 👥 contacts + 📋 open roles + ✨ new this week — weighted, tune in <a href="#settings">Settings</a></div>`;
+    html += `<div class="company-list">${shown.map(companyCardHtml).join('')}</div>`;
     if (hiddenCount > 0) {
       html += `<button class="reveal-toggle" id="toggle-hidden-companies" type="button">
         ${state.showHiddenCompanies ? 'Hide hidden companies' : `${hiddenCount} hidden — show`}
@@ -297,7 +298,7 @@
       <div class="section-title">Who you know</div>
       ${contacts.length
         ? `<div class="contact-list">${contacts.map(contactRowHtml).join('')}</div>`
-        : `<div class="hint">No LinkedIn contacts recorded at this company.</div>`}
+        : `<div class="hint">No LinkedIn contacts recorded at this company. Contacts appear here once a LinkedIn export mentioning this company is loaded.</div>`}
 
       <div class="section-title">Open roles</div>
       <div class="filter-chips" id="filter-chips">
@@ -460,15 +461,17 @@
     const active = filtered.filter((p) => p.user_status === 'none' || !p.user_status);
     const inactive = filtered.filter((p) => p.user_status === 'done' || p.user_status === 'ignored');
 
+    const clearFiltersBtnHtml = `<button class="clear-filters-btn" id="clear-filters-btn" type="button">Clear filters</button>`;
+
     let html = '';
     if (!all.length) {
       html = `<div class="hint">No open postings found for this company.</div>`;
     } else if (!active.length && !inactive.length) {
-      html = `<div class="hint">No postings match these filters.</div>`;
+      html = `<div class="hint">No postings match these filters.</div>${clearFiltersBtnHtml}`;
     } else {
       html = active.length
         ? active.map(postingRowHtml).join('')
-        : `<div class="hint">No open postings match these filters.</div>`;
+        : `<div class="hint">No open postings match these filters.</div>${clearFiltersBtnHtml}`;
     }
 
     if (inactive.length) {
@@ -487,7 +490,18 @@
         renderPostingList();
       });
     }
+    const clearFiltersBtn = document.getElementById('clear-filters-btn');
+    if (clearFiltersBtn) {
+      clearFiltersBtn.addEventListener('click', resetPostingFilters);
+    }
     wirePostingActions();
+  }
+
+  function resetPostingFilters() {
+    state.postingFilters = { remote: false, boston: false, newOnly: false, seniority: new Set() };
+    const chipsEl = document.getElementById('filter-chips');
+    if (chipsEl) chipsEl.querySelectorAll('.chip').forEach((chip) => chip.classList.remove('active'));
+    renderPostingList();
   }
 
   function postingRowHtml(p) {
@@ -498,7 +512,7 @@
       <div class="posting-row${rowClass}" data-id="${esc(p.id)}">
         <div class="posting-info">
           <div class="posting-title">
-            ${esc(p.title)}
+            <span class="posting-title-text" title="${esc(p.title)}">${esc(p.title)}</span>
             ${p.is_new ? '<span class="tag new">NEW</span>' : ''}
             ${isIgnored ? '<span class="status-pill">Ignored</span>' : ''}
           </div>
@@ -506,37 +520,52 @@
         </div>
         <div class="posting-actions">
           ${p.url ? `<a class="apply-btn" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">Apply ↗</a>` : ''}
-          <button class="icon-btn done-btn${isDone ? ' active' : ''}" type="button" data-action="done" aria-label="Mark done">✓</button>
-          <button class="icon-btn ignore-btn${isIgnored ? ' active' : ''}" type="button" data-action="ignore" aria-label="Ignore">✕</button>
+          <button class="icon-btn done-btn${isDone ? ' active' : ''}" type="button" data-action="done" aria-label="Mark done">✓<span class="btn-label">Done</span></button>
+          <button class="icon-btn ignore-btn${isIgnored ? ' active' : ''}" type="button" data-action="ignore" aria-label="Ignore">✕<span class="btn-label">Ignore</span></button>
         </div>
       </div>
     `;
   }
 
+  // Maps a button's data-action to the API's user_status value. The API only
+  // accepts none|done|ignored — 'ignore' is a UI-only label, not a status.
+  const POSTING_ACTION_STATUS = { done: 'done', ignore: 'ignored' };
+
   function wirePostingActions() {
     document.querySelectorAll('.posting-row').forEach((row) => {
       row.querySelectorAll('[data-action]').forEach((btn) => {
-        btn.addEventListener('click', async () => {
+        btn.addEventListener('click', () => {
           const postingId = row.dataset.id;
-          const action = btn.dataset.action;
+          const targetStatus = POSTING_ACTION_STATUS[btn.dataset.action];
+          if (!targetStatus) return;
           const p = (state.detail.postings || []).find((x) => String(x.id) === String(postingId));
           if (!p) return;
-          const prevStatus = p.user_status;
-          const nextStatus = prevStatus === action ? 'none' : action;
-
-          p.user_status = nextStatus;
-          renderPostingList();
-
-          try {
-            await post(`/api/postings/${encodeURIComponent(postingId)}/user_status`, { user_status: nextStatus });
-          } catch (err) {
-            p.user_status = prevStatus;
-            renderPostingList();
-            showToast("Couldn't update posting — try again");
-          }
+          const nextStatus = p.user_status === targetStatus ? 'none' : targetStatus;
+          setPostingStatus(postingId, nextStatus);
         });
       });
     });
+  }
+
+  async function setPostingStatus(postingId, nextStatus) {
+    const p = (state.detail.postings || []).find((x) => String(x.id) === String(postingId));
+    if (!p) return;
+    const prevStatus = p.user_status;
+    p.user_status = nextStatus;
+    renderPostingList();
+
+    try {
+      await post(`/api/postings/${encodeURIComponent(postingId)}/user_status`, { user_status: nextStatus });
+      if (nextStatus === 'done') {
+        showToast('Marked done', { actionLabel: 'Undo', onAction: () => setPostingStatus(postingId, 'none') });
+      } else if (nextStatus === 'ignored') {
+        showToast('Ignored', { actionLabel: 'Undo', onAction: () => setPostingStatus(postingId, 'none') });
+      }
+    } catch (err) {
+      p.user_status = prevStatus;
+      renderPostingList();
+      showToast("Couldn't update posting — try again");
+    }
   }
 
   function wireCompanyActions() {
