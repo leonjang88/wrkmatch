@@ -18,8 +18,21 @@
     showHiddenCompanies: false,
     postingFilters: { remote: false, boston: false, newOnly: false, seniority: new Set() },
     showHiddenPostings: false,
+    showFilteredOutPostings: false,
     atsFormOpen: false,
+    filters: null,
+    tempAllLocations: false,
+    companiesExcluded: 0,
+    showHiddenCoverage: false,
+    jobsList: null,
+    jobsTotal: 0,
+    jobsMatching: 0,
+    jobsShowAll: false,
+    jobsShowFilteredOut: false,
+    jobsShowDone: false,
   };
+
+  let salarySheetState = null;
 
   let toastTimer = null;
 
@@ -56,6 +69,34 @@
     return `${diffMonth}mo ago`;
   }
 
+  function daysAgoLabel(iso) {
+    if (!iso) return null;
+    const then = new Date(iso).getTime();
+    if (Number.isNaN(then)) return null;
+    const diffDay = Math.max(0, Math.floor((Date.now() - then) / 86400000));
+    return diffDay === 0 ? 'today' : `${diffDay}d ago`;
+  }
+
+  function formatSalary(p) {
+    const min = p.salary_min, max = p.salary_max;
+    if (min == null && max == null) return null;
+    const fmt = (n) => `$${Math.round(n / 1000)}k`;
+    if (min != null && max != null) return `${fmt(min)}–${fmt(max)}`;
+    if (min != null) return `${fmt(min)}+`;
+    return `≤${fmt(max)}`;
+  }
+
+  const REMOTE_LABELS = { remote: 'Remote', hybrid: 'Hybrid', onsite: 'Onsite' };
+
+  const SALARY_PRESETS = [
+    { value: null, label: 'None' },
+    { value: 100000, label: '$100k' },
+    { value: 125000, label: '$125k' },
+    { value: 150000, label: '$150k' },
+    { value: 175000, label: '$175k' },
+    { value: 200000, label: '$200k' },
+  ];
+
   async function api(path, opts) {
     const res = await fetch(path, Object.assign({
       headers: { 'Content-Type': 'application/json' },
@@ -71,6 +112,21 @@
 
   function put(path, body) {
     return api(path, { method: 'PUT', body: JSON.stringify(body || {}) });
+  }
+
+  // Single source of truth for filters — Companies tab and Settings tab both
+  // read/write through this, so a change made in either place is reflected
+  // consistently once the caller refetches/repaints.
+  async function saveFilters(patch) {
+    const next = Object.assign({}, state.filters, patch);
+    try {
+      const res = await put('/api/settings/filters', next);
+      state.filters = (res && res.filters) || next;
+      return state.filters;
+    } catch (err) {
+      showToast("Couldn't save filters — try again");
+      throw err;
+    }
   }
 
   function showToast(message, opts) {
@@ -118,7 +174,7 @@
     const parts = hash.split('/').filter(Boolean);
     if (!parts.length) return { tab: 'companies' };
     if (parts[0] === 'companies' && parts[1]) return { tab: 'companies', id: parts[1] };
-    if (['companies', 'coverage', 'settings'].includes(parts[0])) return { tab: parts[0] };
+    if (['companies', 'jobs', 'coverage', 'settings'].includes(parts[0])) return { tab: parts[0] };
     return { tab: 'companies' };
   }
 
@@ -127,10 +183,13 @@
   }
 
   function route() {
+    closeSalarySheet();
     const r = currentRoute();
     setActiveNav(r.tab);
     if (r.tab === 'companies' && r.id) {
       renderCompanyDetail(r.id);
+    } else if (r.tab === 'jobs') {
+      renderJobs();
     } else if (r.tab === 'coverage') {
       renderCoverage();
     } else if (r.tab === 'settings') {
@@ -141,6 +200,113 @@
   }
 
   window.addEventListener('hashchange', route);
+
+  // ---------- global filters (shared by Companies tab + Settings tab) ----------
+
+  function globalFilterChipsHtml() {
+    const f = state.filters || {};
+    const temp = state.tempAllLocations;
+    const locLabel = temp
+      ? '📍 All locations (temp)'
+      : (f.location_enabled ? '📍 Remote + Boston' : '📍 All locations');
+    const locClass = temp ? ' temp' : (f.location_enabled ? ' active' : '');
+    const salaryLabel = f.salary_min ? `💰 $${Math.round(f.salary_min / 1000)}k+` : '💰 Any pay';
+    const salaryClass = f.salary_min ? ' active' : '';
+    return `
+      <button class="filter-chip${locClass}" id="location-chip" type="button">${locLabel}</button>
+      <button class="filter-chip${salaryClass}" id="salary-chip" type="button">${salaryLabel}</button>
+    `;
+  }
+
+  function wireGlobalFilterChips(onChange) {
+    const locBtn = document.getElementById('location-chip');
+    const salBtn = document.getElementById('salary-chip');
+    if (locBtn) {
+      locBtn.addEventListener('click', async () => {
+        if (state.tempAllLocations) {
+          state.tempAllLocations = false;
+          onChange();
+          return;
+        }
+        const f = state.filters || {};
+        try {
+          await saveFilters({ location_enabled: !f.location_enabled });
+          onChange();
+        } catch (err) { /* toast already shown by saveFilters */ }
+      });
+    }
+    if (salBtn) {
+      salBtn.addEventListener('click', () => openSalarySheet(onChange));
+    }
+  }
+
+  function openSalarySheet(onApplied) {
+    const f = state.filters || {};
+    salarySheetState = {
+      min: f.salary_min ?? null,
+      includeUnknown: f.include_unknown_salary !== false,
+      onApplied,
+    };
+    paintSalarySheet();
+  }
+
+  function closeSalarySheet() {
+    salarySheetState = null;
+    paintSalarySheet();
+  }
+
+  function paintSalarySheet() {
+    const root = document.getElementById('sheet-root');
+    if (!root) return;
+    if (!salarySheetState) { root.innerHTML = ''; return; }
+    const s = salarySheetState;
+    root.innerHTML = `
+      <div class="sheet-backdrop" id="sheet-backdrop">
+        <div class="sheet" role="dialog" aria-label="Minimum salary">
+          <div class="sheet-handle"></div>
+          <div class="sheet-title">Minimum salary</div>
+          <div class="sheet-options">
+            ${SALARY_PRESETS.map((p) => `<button class="sheet-option${s.min === p.value ? ' active' : ''}" type="button" data-value="${p.value === null ? '' : p.value}">${p.label}</button>`).join('')}
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="sheet-include-unknown"${s.includeUnknown ? ' checked' : ''}>
+            <span>Include postings without listed pay</span>
+          </label>
+          <div class="sheet-actions">
+            <button class="btn" id="sheet-cancel" type="button">Cancel</button>
+            <button class="save-btn" id="sheet-apply" type="button">Apply</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    root.querySelectorAll('.sheet-option').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        salarySheetState.min = btn.dataset.value === '' ? null : parseInt(btn.dataset.value, 10);
+        paintSalarySheet();
+      });
+    });
+    document.getElementById('sheet-include-unknown').addEventListener('change', (e) => {
+      salarySheetState.includeUnknown = e.target.checked;
+    });
+    document.getElementById('sheet-backdrop').addEventListener('click', (e) => {
+      if (e.target.id === 'sheet-backdrop') closeSalarySheet();
+    });
+    document.getElementById('sheet-cancel').addEventListener('click', closeSalarySheet);
+    document.getElementById('sheet-apply').addEventListener('click', async () => {
+      const applyBtn = document.getElementById('sheet-apply');
+      applyBtn.disabled = true;
+      const onApplied = salarySheetState.onApplied;
+      const payload = { salary_min: salarySheetState.min, include_unknown_salary: salarySheetState.includeUnknown };
+      try {
+        await saveFilters(payload);
+        closeSalarySheet();
+        onApplied();
+      } catch (err) {
+        applyBtn.disabled = false;
+      }
+    });
+  }
 
   // ---------- companies tab ----------
 
@@ -153,10 +319,17 @@
         <div class="skeleton skeleton-card"></div>
       </div>
     `;
+    state.tempAllLocations = false;
+    await loadCompanies();
+  }
 
-    let summary, companies;
+  async function loadCompanies() {
+    const qs = new URLSearchParams({ include_hidden: '1' });
+    if (state.tempAllLocations) qs.set('all_locations', '1');
+
+    let summary, companiesRes;
     try {
-      [summary, companies] = await Promise.all([api('/api/summary'), api('/api/companies?include_hidden=1')]);
+      [summary, companiesRes] = await Promise.all([api('/api/summary'), api(`/api/companies?${qs.toString()}`)]);
     } catch (err) {
       renderErrorState(viewEl, {
         title: "Can't reach wrkmatch",
@@ -167,7 +340,9 @@
     }
 
     state.summary = summary;
-    state.companies = companies.companies || [];
+    state.companies = companiesRes.companies || [];
+    state.filters = companiesRes.filters || state.filters;
+    state.companiesExcluded = companiesRes.companies_excluded_by_filters || 0;
 
     renderTopbarStats(summary);
     renderCompanyList();
@@ -186,15 +361,44 @@
     `;
   }
 
+  function filterBarHtml() {
+    const excluded = state.companiesExcluded || 0;
+    let note = '';
+    if (excluded > 0 && !state.tempAllLocations) {
+      note = `<div class="filter-bar-note">${excluded} companies hidden by filters — <button class="link-btn" id="show-all-locations-btn" type="button">show all locations</button></div>`;
+    } else if (excluded > 0 && state.tempAllLocations) {
+      note = `<div class="filter-bar-note">${excluded} companies still hidden by filters</div>`;
+    }
+    return `<div class="filter-bar" id="global-filter-bar"><div class="filter-bar-chips">${globalFilterChipsHtml()}</div>${note}</div>`;
+  }
+
+  function wireShowAllLocations() {
+    const btn = document.getElementById('show-all-locations-btn');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        state.tempAllLocations = true;
+        loadCompanies();
+      });
+    }
+  }
+
   function renderCompanyList() {
     const all = state.companies || [];
 
     if (!all.length) {
-      renderEmptyState(viewEl, {
-        icon: '🕵️',
-        title: 'No companies yet',
-        desc: 'Run a scan to pull in companies from your contacts and job boards.',
-      });
+      const desc = state.companiesExcluded > 0
+        ? 'Try broadening your filters, or run a scan to pull in more companies.'
+        : 'Run a scan to pull in companies from your contacts and job boards.';
+      viewEl.innerHTML = `
+        ${filterBarHtml()}
+        <div class="empty-state">
+          <div class="icon">🕵️</div>
+          <div class="title">No companies match</div>
+          <div class="desc">${esc(desc)}</div>
+        </div>
+      `;
+      wireGlobalFilterChips(loadCompanies);
+      wireShowAllLocations();
       return;
     }
 
@@ -202,7 +406,8 @@
     const hiddenCount = all.length - visible.length;
     const shown = state.showHiddenCompanies ? all : visible;
 
-    let html = `<div class="score-legend">Score = 👥 contacts + 📋 open roles + ✨ new this week — weighted, tune in <a href="#settings">Settings</a></div>`;
+    let html = filterBarHtml();
+    html += `<div class="score-legend">Score = 👥 contacts + 📋 open roles + ✨ new this week — weighted, tune in <a href="#settings">Settings</a></div>`;
     html += `<div class="company-list">${shown.map(companyCardHtml).join('')}</div>`;
     if (hiddenCount > 0) {
       html += `<button class="reveal-toggle" id="toggle-hidden-companies" type="button">
@@ -222,6 +427,9 @@
         renderCompanyList();
       });
     }
+
+    wireGlobalFilterChips(loadCompanies);
+    wireShowAllLocations();
   }
 
   function companyCardHtml(c) {
@@ -262,6 +470,7 @@
     state.detailId = id;
     state.postingFilters = { remote: false, boston: false, newOnly: false, seniority: new Set() };
     state.showHiddenPostings = false;
+    state.showFilteredOutPostings = false;
     state.atsFormOpen = false;
 
     let detail;
@@ -458,20 +667,26 @@
     const all = state.detail.postings || [];
     const filtered = all.filter(postingMatchesFilters);
 
-    const active = filtered.filter((p) => p.user_status === 'none' || !p.user_status);
-    const inactive = filtered.filter((p) => p.user_status === 'done' || p.user_status === 'ignored');
+    const { active, filteredOut, inactive } = bucketByStatusAndFilters(filtered);
 
     const clearFiltersBtnHtml = `<button class="clear-filters-btn" id="clear-filters-btn" type="button">Clear filters</button>`;
 
     let html = '';
     if (!all.length) {
       html = `<div class="hint">No open postings found for this company.</div>`;
-    } else if (!active.length && !inactive.length) {
+    } else if (!filtered.length) {
       html = `<div class="hint">No postings match these filters.</div>${clearFiltersBtnHtml}`;
     } else {
       html = active.length
         ? active.map(postingRowHtml).join('')
         : `<div class="hint">No open postings match these filters.</div>${clearFiltersBtnHtml}`;
+    }
+
+    if (filteredOut.length) {
+      html += `<button class="hidden-toggle" id="toggle-filtered-postings" type="button">
+        ${state.showFilteredOutPostings ? 'Hide filtered out' : `${filteredOut.length} filtered out — show`}
+      </button>`;
+      if (state.showFilteredOutPostings) html += filteredOut.map(postingRowHtml).join('');
     }
 
     if (inactive.length) {
@@ -483,6 +698,13 @@
 
     listEl.innerHTML = html;
 
+    const filteredToggle = document.getElementById('toggle-filtered-postings');
+    if (filteredToggle) {
+      filteredToggle.addEventListener('click', () => {
+        state.showFilteredOutPostings = !state.showFilteredOutPostings;
+        renderPostingList();
+      });
+    }
     const toggle = document.getElementById('toggle-hidden-postings');
     if (toggle) {
       toggle.addEventListener('click', () => {
@@ -504,10 +726,54 @@
     renderPostingList();
   }
 
+  // Shared by company-detail posting rows and Jobs-tab rows — keeps the
+  // salary/remote/department/age formatting identical in both places.
+  function metaChipParts(p) {
+    const parts = [];
+    const salary = formatSalary(p);
+    if (salary) parts.push(`<span class="meta-chip salary">${esc(salary)}</span>`);
+    if (p.remote && REMOTE_LABELS[p.remote]) {
+      parts.push(`<span class="meta-chip remote remote-${esc(p.remote)}">${REMOTE_LABELS[p.remote]}</span>`);
+    }
+    if (p.department) parts.push(`<span class="meta-chip dept" title="${esc(p.department)}">${esc(p.department)}</span>`);
+    const age = daysAgoLabel(p.posted_at || p.first_seen);
+    if (age) parts.push(`<span class="meta-chip age">${esc(age)}</span>`);
+    return parts;
+  }
+
+  function postingMetaHtml(p) {
+    const parts = metaChipParts(p);
+    if (!parts.length) return '';
+    return `<div class="posting-meta">${parts.join('')}</div>`;
+  }
+
+  function contactChipHtml(p) {
+    const n = p.contact_count || 0;
+    return `<span class="meta-chip contacts${n === 0 ? ' cold' : ''}">👥 ${n}</span>`;
+  }
+
+  function jobMetaHtml(p) {
+    const parts = metaChipParts(p);
+    parts.push(contactChipHtml(p));
+    return `<div class="posting-meta">${parts.join('')}</div>`;
+  }
+
+  // Groups a flat posting list the same way everywhere it's needed: done/ignored
+  // wins over filtered-out when a posting is both, matching the reveal-toggle
+  // idiom used in both company detail and the Jobs tab.
+  function bucketByStatusAndFilters(list) {
+    const inactive = list.filter((p) => p.user_status === 'done' || p.user_status === 'ignored');
+    const remaining = list.filter((p) => p.user_status !== 'done' && p.user_status !== 'ignored');
+    const filteredOut = remaining.filter((p) => p.matches_filters === false);
+    const active = remaining.filter((p) => p.matches_filters !== false);
+    return { active, filteredOut, inactive };
+  }
+
   function postingRowHtml(p) {
     const isDone = p.user_status === 'done';
     const isIgnored = p.user_status === 'ignored';
-    const rowClass = isDone ? ' done' : isIgnored ? ' ignored' : '';
+    const isFilteredOut = !isDone && !isIgnored && p.matches_filters === false;
+    const rowClass = isDone ? ' done' : isIgnored ? ' ignored' : isFilteredOut ? ' filtered-out' : '';
     return `
       <div class="posting-row${rowClass}" data-id="${esc(p.id)}">
         <div class="posting-info">
@@ -517,6 +783,7 @@
             ${isIgnored ? '<span class="status-pill">Ignored</span>' : ''}
           </div>
           <div class="posting-location">${esc(p.location || 'Location unknown')}</div>
+          ${postingMetaHtml(p)}
         </div>
         <div class="posting-actions">
           ${p.url ? `<a class="apply-btn" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">Apply ↗</a>` : ''}
@@ -547,25 +814,32 @@
     });
   }
 
-  async function setPostingStatus(postingId, nextStatus) {
-    const p = (state.detail.postings || []).find((x) => String(x.id) === String(postingId));
+  // Shared by company-detail posting rows and Jobs-tab rows — same optimistic
+  // update + toast/Undo + rollback-on-error behavior, just parameterized by
+  // which list holds the posting and how to repaint after mutating it.
+  async function setPostingStatusGeneric(list, postingId, nextStatus, repaint) {
+    const p = (list || []).find((x) => String(x.id) === String(postingId));
     if (!p) return;
     const prevStatus = p.user_status;
     p.user_status = nextStatus;
-    renderPostingList();
+    repaint();
 
     try {
       await post(`/api/postings/${encodeURIComponent(postingId)}/user_status`, { user_status: nextStatus });
       if (nextStatus === 'done') {
-        showToast('Marked done', { actionLabel: 'Undo', onAction: () => setPostingStatus(postingId, 'none') });
+        showToast('Marked done', { actionLabel: 'Undo', onAction: () => setPostingStatusGeneric(list, postingId, 'none', repaint) });
       } else if (nextStatus === 'ignored') {
-        showToast('Ignored', { actionLabel: 'Undo', onAction: () => setPostingStatus(postingId, 'none') });
+        showToast('Ignored', { actionLabel: 'Undo', onAction: () => setPostingStatusGeneric(list, postingId, 'none', repaint) });
       }
     } catch (err) {
       p.user_status = prevStatus;
-      renderPostingList();
+      repaint();
       showToast("Couldn't update posting — try again");
     }
+  }
+
+  function setPostingStatus(postingId, nextStatus) {
+    return setPostingStatusGeneric(state.detail.postings || [], postingId, nextStatus, renderPostingList);
   }
 
   function wireCompanyActions() {
@@ -621,15 +895,218 @@
     });
   }
 
+  // ---------- jobs tab ----------
+
+  async function renderJobs() {
+    topbarEl.innerHTML = `<div class="topbar-title">Jobs</div>`;
+    viewEl.innerHTML = `
+      <div class="skeleton skeleton-card"></div>
+      <div class="skeleton skeleton-card"></div>
+      <div class="skeleton skeleton-card"></div>
+    `;
+    state.jobsShowAll = false;
+    state.jobsShowFilteredOut = false;
+    state.jobsShowDone = false;
+    await loadJobs();
+  }
+
+  async function loadJobs() {
+    const qs = new URLSearchParams();
+    if (state.jobsShowAll) qs.set('all', '1');
+
+    let filters, jobsRes;
+    try {
+      [filters, jobsRes] = await Promise.all([
+        api('/api/settings/filters'),
+        api(`/api/postings${qs.toString() ? '?' + qs.toString() : ''}`),
+      ]);
+    } catch (err) {
+      renderErrorState(viewEl, {
+        title: "Can't reach wrkmatch",
+        desc: 'Make sure the server is running, then try again.',
+        onRetry: renderJobs,
+      });
+      return;
+    }
+
+    state.filters = filters;
+    state.jobsList = jobsRes.postings || [];
+    state.jobsTotal = jobsRes.total || 0;
+    state.jobsMatching = jobsRes.matching || 0;
+    paintJobs();
+  }
+
+  function paintJobs() {
+    viewEl.innerHTML = `
+      <div class="filter-bar" id="global-filter-bar"><div class="filter-bar-chips">${globalFilterChipsHtml()}</div></div>
+      ${jobsHeaderHtml()}
+      <div id="jobs-list"></div>
+    `;
+    wireGlobalFilterChips(loadJobs);
+    wireJobsHeader();
+    renderJobsList();
+  }
+
+  function jobsHeaderHtml() {
+    const matching = state.jobsMatching || 0;
+    const total = state.jobsTotal || 0;
+    let html = `<div class="jobs-count-line">${matching} role${matching === 1 ? '' : 's'} match your filters</div>`;
+    if (total > matching || state.jobsShowAll) {
+      html += `<button class="reveal-toggle" id="toggle-jobs-show-all" type="button">
+        ${state.jobsShowAll ? 'Show matching only' : `+${total - matching} more hidden by filters — show`}
+      </button>`;
+    }
+    return html;
+  }
+
+  function wireJobsHeader() {
+    const btn = document.getElementById('toggle-jobs-show-all');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        state.jobsShowAll = !state.jobsShowAll;
+        state.jobsShowFilteredOut = false;
+        state.jobsShowDone = false;
+        loadJobs();
+      });
+    }
+  }
+
+  function jobRowHtml(p) {
+    const isDone = p.user_status === 'done';
+    const isIgnored = p.user_status === 'ignored';
+    const isFilteredOut = !isDone && !isIgnored && p.matches_filters === false;
+    const rowClass = isDone ? ' done' : isIgnored ? ' ignored' : isFilteredOut ? ' filtered-out' : '';
+    return `
+      <div class="posting-row job-row${rowClass}" data-id="${esc(p.id)}">
+        <div class="posting-info">
+          <div class="posting-title">
+            <span class="posting-title-text" title="${esc(p.title)}">${esc(p.title)}</span>
+            ${p.is_new ? '<span class="tag new">NEW</span>' : ''}
+            ${isIgnored ? '<span class="status-pill">Ignored</span>' : ''}
+          </div>
+          <button class="job-company-link" type="button" data-company-id="${esc(p.company_id)}">${esc(titleCase(p.company_name))}</button>
+          ${jobMetaHtml(p)}
+        </div>
+        <div class="posting-actions">
+          ${p.url ? `<a class="apply-btn" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">Apply ↗</a>` : ''}
+          <button class="icon-btn done-btn${isDone ? ' active' : ''}" type="button" data-action="done" aria-label="Mark done">✓<span class="btn-label">Done</span></button>
+          <button class="icon-btn ignore-btn${isIgnored ? ' active' : ''}" type="button" data-action="ignore" aria-label="Ignore">✕<span class="btn-label">Ignore</span></button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderJobsList() {
+    const listEl = document.getElementById('jobs-list');
+    if (!listEl) return;
+    const all = state.jobsList || [];
+
+    let html = '';
+    if (!all.length) {
+      const desc = state.jobsShowAll
+        ? 'No roles found at all — try running a scan.'
+        : 'No roles match your current filters.';
+      html = `
+        <div class="empty-state">
+          <div class="icon">💼</div>
+          <div class="title">No roles ${state.jobsShowAll ? 'found' : 'match'}</div>
+          <div class="desc">${esc(desc)}</div>
+        </div>
+      `;
+      if (!state.jobsShowAll) html += `<button class="clear-filters-btn" id="jobs-clear-filters-btn" type="button">Clear filters</button>`;
+    } else if (!state.jobsShowAll) {
+      // Default fetch already returns only matching + user_status='none' rows.
+      // A row marked done/ignored optimistically just drops out here — the
+      // next real fetch wouldn't have included it either.
+      const visible = all.filter((p) => p.user_status !== 'done' && p.user_status !== 'ignored');
+      html = visible.length ? visible.map(jobRowHtml).join('') : `<div class="hint">No open roles match these filters.</div>`;
+    } else {
+      const { active, filteredOut, inactive } = bucketByStatusAndFilters(all);
+      html = active.length ? active.map(jobRowHtml).join('') : `<div class="hint">No open roles match these filters.</div>`;
+
+      if (filteredOut.length) {
+        html += `<button class="hidden-toggle" id="toggle-jobs-filtered" type="button">
+          ${state.jobsShowFilteredOut ? 'Hide filtered out' : `${filteredOut.length} filtered out — show`}
+        </button>`;
+        if (state.jobsShowFilteredOut) html += filteredOut.map(jobRowHtml).join('');
+      }
+      if (inactive.length) {
+        html += `<button class="hidden-toggle" id="toggle-jobs-done" type="button">
+          ${state.jobsShowDone ? 'Hide done/ignored' : `${inactive.length} ignored/done hidden — show`}
+        </button>`;
+        if (state.jobsShowDone) html += inactive.map(jobRowHtml).join('');
+      }
+    }
+
+    listEl.innerHTML = html;
+
+    const filteredToggle = document.getElementById('toggle-jobs-filtered');
+    if (filteredToggle) {
+      filteredToggle.addEventListener('click', () => {
+        state.jobsShowFilteredOut = !state.jobsShowFilteredOut;
+        renderJobsList();
+      });
+    }
+    const doneToggle = document.getElementById('toggle-jobs-done');
+    if (doneToggle) {
+      doneToggle.addEventListener('click', () => {
+        state.jobsShowDone = !state.jobsShowDone;
+        renderJobsList();
+      });
+    }
+    const clearBtn = document.getElementById('jobs-clear-filters-btn');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        try {
+          await saveFilters({ location_enabled: false, salary_min: null });
+        } catch (err) {
+          return;
+        }
+        state.jobsShowAll = false;
+        await loadJobs();
+      });
+    }
+
+    listEl.querySelectorAll('.job-company-link').forEach((btn) => {
+      btn.addEventListener('click', () => { location.hash = `#companies/${btn.dataset.companyId}`; });
+    });
+
+    wireJobRowActions();
+  }
+
+  function setJobStatus(postingId, nextStatus) {
+    return setPostingStatusGeneric(state.jobsList || [], postingId, nextStatus, renderJobsList);
+  }
+
+  function wireJobRowActions() {
+    document.querySelectorAll('#jobs-list .job-row').forEach((row) => {
+      row.querySelectorAll('[data-action]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const postingId = row.dataset.id;
+          const targetStatus = POSTING_ACTION_STATUS[btn.dataset.action];
+          if (!targetStatus) return;
+          const p = (state.jobsList || []).find((x) => String(x.id) === String(postingId));
+          if (!p) return;
+          const nextStatus = p.user_status === targetStatus ? 'none' : targetStatus;
+          setJobStatus(postingId, nextStatus);
+        });
+      });
+    });
+  }
+
   // ---------- coverage tab ----------
 
   async function renderCoverage() {
     topbarEl.innerHTML = `<div class="topbar-title">Coverage</div>`;
     viewEl.innerHTML = `<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>`;
+    state.showHiddenCoverage = false;
+    await loadCoverage();
+  }
 
+  async function loadCoverage() {
     let coverage;
     try {
-      coverage = await api('/api/coverage');
+      coverage = await api(`/api/coverage?include_hidden=${state.showHiddenCoverage ? 1 : 0}`);
     } catch (err) {
       renderErrorState(viewEl, {
         title: "Can't reach wrkmatch",
@@ -639,8 +1116,14 @@
       return;
     }
     state.coverage = coverage;
+    paintCoverage();
+  }
 
+  function paintCoverage() {
+    const coverage = state.coverage;
     const noAts = coverage.no_ats || [];
+    const hiddenCount = coverage.hidden_count || 0;
+
     const listHtml = noAts.length
       ? `<div class="no-ats-list">${noAts.map(noAtsRowHtml).join('')}</div>`
       : `<div class="empty-state">
@@ -649,23 +1132,92 @@
           <div class="desc">Every company has a discovered job board.</div>
         </div>`;
 
-    viewEl.innerHTML = `
+    let html = `
       <div class="stat-line">${coverage.companies_with_ats} of ${coverage.companies_total} companies scannable</div>
       <div class="hint">These companies' job boards weren't found — check them manually.</div>
       ${listHtml}
     `;
+    if (hiddenCount > 0) {
+      html += `<button class="reveal-toggle" id="toggle-hidden-coverage" type="button">
+        ${state.showHiddenCoverage ? 'Hide ignored' : `${hiddenCount} ignored — show`}
+      </button>`;
+    }
+    viewEl.innerHTML = html;
+    wireCoverageActions();
   }
 
   function noAtsRowHtml(c) {
+    const isHidden = c.priority === 'hidden';
+    const actionBtn = isHidden
+      ? `<button class="icon-btn unhide-btn" type="button" data-action="unhide" data-id="${esc(c.id)}">↺<span class="btn-label">Unhide</span></button>`
+      : `<button class="icon-btn ignore-btn" type="button" data-action="ignore" data-id="${esc(c.id)}" aria-label="Ignore">✕<span class="btn-label">Ignore</span></button>`;
     return `
-      <div class="no-ats-row">
+      <div class="no-ats-row${isHidden ? ' muted' : ''}">
         <div class="no-ats-info">
           <div class="no-ats-name">${esc(titleCase(c.name))}</div>
           <div class="no-ats-meta">${c.contact_count} contact${c.contact_count === 1 ? '' : 's'}${c.priority && c.priority !== 'normal' ? ` · ${esc(c.priority)}` : ''}</div>
         </div>
-        ${c.search_url ? `<a class="find-btn" href="${esc(c.search_url)}" target="_blank" rel="noopener noreferrer">Find jobs ↗</a>` : ''}
+        <div class="no-ats-actions">
+          ${c.search_url ? `<a class="find-btn" href="${esc(c.search_url)}" target="_blank" rel="noopener noreferrer">Find jobs ↗</a>` : ''}
+          ${actionBtn}
+        </div>
       </div>
     `;
+  }
+
+  function wireCoverageActions() {
+    viewEl.querySelectorAll('.no-ats-row [data-action="ignore"]').forEach((btn) => {
+      btn.addEventListener('click', () => ignoreCoverageCompany(btn.dataset.id));
+    });
+    viewEl.querySelectorAll('.no-ats-row [data-action="unhide"]').forEach((btn) => {
+      btn.addEventListener('click', () => unhideCoverageCompany(btn.dataset.id));
+    });
+    const toggle = document.getElementById('toggle-hidden-coverage');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        state.showHiddenCoverage = !state.showHiddenCoverage;
+        loadCoverage();
+      });
+    }
+  }
+
+  async function ignoreCoverageCompany(id) {
+    const list = state.coverage.no_ats || [];
+    const idx = list.findIndex((c) => String(c.id) === String(id));
+    if (idx === -1) return;
+    const removed = list[idx];
+    list.splice(idx, 1);
+    state.coverage.hidden_count = (state.coverage.hidden_count || 0) + 1;
+    paintCoverage();
+
+    try {
+      await post(`/api/companies/${encodeURIComponent(id)}/priority`, { priority: 'hidden' });
+      showToast('Company ignored', { actionLabel: 'Undo', onAction: () => undoIgnoreCoverageCompany(id) });
+    } catch (err) {
+      list.splice(idx, 0, removed);
+      state.coverage.hidden_count = Math.max(0, (state.coverage.hidden_count || 1) - 1);
+      paintCoverage();
+      showToast("Couldn't update — try again");
+    }
+  }
+
+  async function undoIgnoreCoverageCompany(id) {
+    try {
+      await post(`/api/companies/${encodeURIComponent(id)}/priority`, { priority: 'normal' });
+    } catch (err) {
+      showToast("Couldn't undo — try again");
+    }
+    await loadCoverage();
+  }
+
+  async function unhideCoverageCompany(id) {
+    try {
+      await post(`/api/companies/${encodeURIComponent(id)}/priority`, { priority: 'normal' });
+      showToast('Company unhidden');
+    } catch (err) {
+      showToast("Couldn't update — try again");
+    }
+    await loadCoverage();
   }
 
   // ---------- settings tab ----------
@@ -680,9 +1232,9 @@
     topbarEl.innerHTML = `<div class="topbar-title">Settings</div>`;
     viewEl.innerHTML = `<div class="skeleton skeleton-card"></div>`;
 
-    let summary;
+    let summary, filters;
     try {
-      summary = await api('/api/summary');
+      [summary, filters] = await Promise.all([api('/api/summary'), api('/api/settings/filters')]);
     } catch (err) {
       renderErrorState(viewEl, {
         title: "Can't reach wrkmatch",
@@ -692,9 +1244,23 @@
       return;
     }
     state.summary = summary;
+    state.filters = filters;
     state.weights = Object.assign({ contacts: 1, postings: 1, freshness: 1 }, summary.weights || {});
 
+    paintSettings();
+  }
+
+  function paintSettings() {
+    const summary = state.summary;
+
     viewEl.innerHTML = `
+      <div class="section-title">Filters</div>
+      <div class="settings-card" id="filters-card">
+        <div class="filter-bar-chips">${globalFilterChipsHtml()}</div>
+        <div class="slider-hint">Location narrows matches to Remote + Boston-area postings. Salary sets a minimum pay floor. Both apply everywhere — Companies list, scores, and counts.</div>
+      </div>
+
+      <div class="section-title">Score weights</div>
       <div class="settings-card">
         ${WEIGHT_META.map((w) => `
           <div class="slider-block">
@@ -717,6 +1283,8 @@
         <div class="stat-tile"><div class="stat-value">${summary.open_postings}</div><div class="stat-label">Open postings</div></div>
       </div>
     `;
+
+    wireGlobalFilterChips(paintSettings);
 
     WEIGHT_META.forEach((w) => {
       const slider = document.getElementById(`slider-${w.key}`);

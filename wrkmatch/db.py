@@ -68,6 +68,13 @@ _MIGRATED_COLUMNS = {
     ],
     "postings": [
         ("user_status", "TEXT NOT NULL DEFAULT 'none'"),
+        ("department", "TEXT"),
+        ("posted_at", "TEXT"),
+        ("salary_min", "INTEGER"),
+        ("salary_max", "INTEGER"),
+        ("salary_currency", "TEXT"),
+        ("remote", "TEXT"),
+        ("enriched_at", "TEXT"),
     ],
 }
 
@@ -181,10 +188,18 @@ def record_posting(
     url: str,
     location: Optional[str] = None,
     ats_platform: Optional[str] = None,
+    department: Optional[str] = None,
+    posted_at: Optional[str] = None,
 ) -> int:
     """Insert a new posting or update an existing one (matched by url).
     New postings get first_seen == last_seen == now and status='open'.
     Existing postings keep first_seen and get last_seen (and mutable fields) updated.
+
+    department/posted_at follow "preserve on None" semantics for existing rows
+    (COALESCE(new, existing)) -- an update call that doesn't have a fresher
+    value for them leaves whatever was already stored. All other mutable
+    fields (title, location, ats_platform) are unconditionally overwritten,
+    matching the pre-existing behavior.
     """
     now = _now()
     row = conn.execute("SELECT id FROM postings WHERE url = ?", (url,)).fetchone()
@@ -192,20 +207,24 @@ def record_posting(
         cur = conn.execute(
             """
             INSERT INTO postings
-                (company_id, title, url, location, ats_platform, first_seen, last_seen, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'open')
+                (company_id, title, url, location, ats_platform, department, posted_at,
+                 first_seen, last_seen, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
             """,
-            (company_id, title, url, location, ats_platform, now, now),
+            (company_id, title, url, location, ats_platform, department, posted_at, now, now),
         )
         conn.commit()
         return int(cur.lastrowid or 0)
     posting_id = row["id"]
     conn.execute(
         """
-        UPDATE postings SET company_id = ?, title = ?, location = ?, ats_platform = ?, last_seen = ?
+        UPDATE postings
+        SET company_id = ?, title = ?, location = ?, ats_platform = ?,
+            department = COALESCE(?, department), posted_at = COALESCE(?, posted_at),
+            last_seen = ?
         WHERE id = ?
         """,
-        (company_id, title, location, ats_platform, now, posting_id),
+        (company_id, title, location, ats_platform, department, posted_at, now, posting_id),
     )
     conn.commit()
     return posting_id

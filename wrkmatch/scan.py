@@ -112,6 +112,8 @@ def run_scan(
                 url=job.url,
                 location=job.location,
                 ats_platform=platform,
+                department=job.department,
+                posted_at=job.posted_at,
             )
             result_urls.add(job.url)
             if existing is None:
