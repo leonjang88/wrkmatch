@@ -156,7 +156,7 @@
 
     let summary, companies;
     try {
-      [summary, companies] = await Promise.all([api('/api/summary'), api('/api/companies')]);
+      [summary, companies] = await Promise.all([api('/api/summary'), api('/api/companies?include_hidden=1')]);
     } catch (err) {
       renderErrorState(viewEl, {
         title: "Can't reach wrkmatch",

@@ -25,6 +25,7 @@ See docstrings inline on each test for the endpoint it targets.
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -101,6 +102,26 @@ def test_index_returns_200_without_static_index_html(seed):
     client = client_for(db_path)
     resp = client.get("/")
     assert resp.status_code == 200
+
+
+def test_index_asset_references_all_resolve(seed):
+    """Every src/href asset reference in the served index.html must resolve
+    to a 200 via the same TestClient. Regression test for a bug where
+    index.html used relative paths ("style.css", "app.js") while assets are
+    mounted at /static/, so the browser 404'd on both and no JS ever ran.
+    """
+    _, db_path = seed
+    client = client_for(db_path)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers.get("content-type", "")
+
+    refs = re.findall(r'\b(?:src|href)="([^"]+)"', resp.text)
+    asset_refs = [r for r in refs if not r.startswith("#") and not r.startswith("http")]
+    assert asset_refs, "expected index.html to reference at least one local asset"
+    for ref in asset_refs:
+        asset_resp = client.get(ref)
+        assert asset_resp.status_code == 200, f"asset reference {ref!r} returned {asset_resp.status_code}"
 
 
 # --- GET /api/summary --------------------------------------------------------
