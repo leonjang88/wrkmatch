@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0c">
+<title>wrkmatch</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar" id="topbar"></header>
+
+  <main id="view" class="view" aria-live="polite"></main>
+
+  <nav class="bottom-nav" id="bottom-nav">
+    <a class="nav-btn" data-tab="companies" href="#companies">
+      <span class="nav-icon" aria-hidden="true">🏢</span>
+      <span class="nav-label">Companies</span>
+    </a>
+    <a class="nav-btn" data-tab="coverage" href="#coverage">
+      <span class="nav-icon" aria-hidden="true">🧭</span>
+      <span class="nav-label">Coverage</span>
+    </a>
+    <a class="nav-btn" data-tab="settings" href="#settings">
+      <span class="nav-icon" aria-hidden="true">⚙️</span>
+      <span class="nav-label">Settings</span>
+    </a>
+  </nav>
+
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
