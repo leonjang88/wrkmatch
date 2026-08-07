@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS contacts (
     position TEXT,
     connected_on TEXT,
     source TEXT NOT NULL,
+    url TEXT,
+    email TEXT,
+    rating TEXT NOT NULL DEFAULT 'ok',
     UNIQUE(first_name, last_name, company, source)
 );
 
@@ -20,7 +23,8 @@ CREATE TABLE IF NOT EXISTS companies (
     name TEXT NOT NULL UNIQUE,
     ats_platform TEXT,
     ats_slug TEXT,
-    last_scanned TEXT
+    last_scanned TEXT,
+    priority TEXT NOT NULL DEFAULT 'normal'
 );
 
 CREATE TABLE IF NOT EXISTS postings (
@@ -32,7 +36,8 @@ CREATE TABLE IF NOT EXISTS postings (
     ats_platform TEXT,
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    user_status TEXT NOT NULL DEFAULT 'none'
 );
 
 CREATE TABLE IF NOT EXISTS scans (
@@ -43,39 +48,103 @@ CREATE TABLE IF NOT EXISTS scans (
     postings_found INTEGER,
     new_postings INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# columns added after the original (v1) schema, keyed by table.
+# Applied via idempotent ALTER TABLE so existing v1 databases pick them up.
+_MIGRATED_COLUMNS = {
+    "contacts": [
+        ("url", "TEXT"),
+        ("email", "TEXT"),
+        ("rating", "TEXT NOT NULL DEFAULT 'ok'"),
+    ],
+    "companies": [
+        ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
+    ],
+    "postings": [
+        ("user_status", "TEXT NOT NULL DEFAULT 'none'"),
+    ],
+}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any columns introduced after the v1 schema to an existing database.
+    Uses PRAGMA table_info to detect what's missing, so it's safe to call
+    repeatedly and against both fresh (already-current) and older v1 databases.
+    """
+    for table, columns in _MIGRATED_COLUMNS.items():
+        existing = _existing_columns(conn, table)
+        for col_name, col_def in columns:
+            if col_name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 def init_db(path) -> sqlite3.Connection:
     """Open (creating if needed) the wrkmatch sqlite db and apply the schema.
-    Safe to call repeatedly against the same path.
+    Safe to call repeatedly against the same path, including against an
+    existing v1 database that predates the settings table and the
+    url/email/rating/priority/user_status columns.
     """
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrate(conn)
     return conn
 
 
 def upsert_contacts(conn: sqlite3.Connection, contacts: List[dict], source: str) -> int:
     """Insert contacts, skipping ones that already exist for the same
     (first_name, last_name, company, source). Returns count newly inserted.
+
+    When a contact is skipped as a dupe, its url/email are backfilled onto the
+    existing row wherever that row's url/email are still NULL — existing
+    non-NULL url/email are never overwritten.
     """
     inserted = 0
     for c in contacts:
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO contacts
-                (first_name, last_name, company, position, connected_on, source)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (first_name, last_name, company, position, connected_on, source, url, email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (c["first_name"], c["last_name"], c["company"], c.get("position"), c.get("connected_on"), source),
+            (
+                c["first_name"],
+                c["last_name"],
+                c["company"],
+                c.get("position"),
+                c.get("connected_on"),
+                source,
+                c.get("url"),
+                c.get("email"),
+            ),
         )
-        inserted += cur.rowcount
+        if cur.rowcount:
+            inserted += cur.rowcount
+        else:
+            conn.execute(
+                """
+                UPDATE contacts
+                SET url = COALESCE(url, ?), email = COALESCE(email, ?)
+                WHERE first_name = ? AND last_name = ? AND company = ? AND source = ?
+                """,
+                (c.get("url"), c.get("email"), c["first_name"], c["last_name"], c["company"], source),
+            )
     conn.commit()
     return inserted
 
@@ -203,6 +272,26 @@ def get_open_postings(conn: sqlite3.Connection) -> List[dict]:
         """
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_setting(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
+    """Look up a settings value by key. Returns `default` when the key is unset."""
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return default
+    return row["value"]
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Insert or update a settings value by key."""
+    conn.execute(
+        """
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
 
 
 def get_companies_with_contacts(conn: sqlite3.Connection) -> List[dict]:

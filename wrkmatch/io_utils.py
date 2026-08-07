@@ -90,9 +90,12 @@ def read_connections(file_or_path) -> pd.DataFrame:
 def connections_to_contacts(df: pd.DataFrame) -> list[dict]:
     """Converts a read_connections() DataFrame into contact dicts for db.upsert_contacts.
 
-    One dict per row with keys first_name, last_name, company, position, connected_on.
+    One dict per row with keys first_name, last_name, company, position,
+    connected_on, url, email.
     - first_name/last_name/company are always strings (never None, never "nan")
-    - position/connected_on may be None when absent/NaN but never the literal "nan" string
+    - position/connected_on/url/email may be None when absent/NaN but never the
+      literal "nan" string. url comes from the "URL" column, email from
+      "Email Address".
     - Empty df returns empty list.
     """
     if df.empty:
@@ -133,12 +136,30 @@ def connections_to_contacts(df: pd.DataFrame) -> list[dict]:
             if not connected_on:
                 connected_on = None
 
+        url = row.get("URL")
+        if pd.isna(url) or url == "":
+            url = None
+        else:
+            url = str(url).strip()
+            if not url:
+                url = None
+
+        email = row.get("Email Address")
+        if pd.isna(email) or email == "":
+            email = None
+        else:
+            email = str(email).strip()
+            if not email:
+                email = None
+
         contact = {
             "first_name": first_name,
             "last_name": last_name,
             "company": company,
             "position": position,
             "connected_on": connected_on,
+            "url": url,
+            "email": email,
         }
         contacts.append(contact)
 

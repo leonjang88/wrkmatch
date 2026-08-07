@@ -75,6 +75,11 @@ Emma,Weber,Emma Weber,,Freelancer,06 Jun 2023
 Ava,Nguyen,Ava Nguyen,Acme Inc,Senior PM at Acme Inc,01 Jan 2023
 """
 
+# Newer LinkedIn exports include URL and Email Address columns.
+WITH_URL_EMAIL_CSV = """First Name,Last Name,Full Name,URL,Email Address,Company,Position,Connected On
+Ava,Nguyen,Ava Nguyen,https://linkedin.com/in/avanguyen,ava@example.com,Acme Inc,Senior PM at Acme Inc,01 Jan 2023
+"""
+
 
 def _write_utf16(path, text: str) -> None:
     path.write_bytes(text.encode("utf-16"))
@@ -103,6 +108,8 @@ def test_connections_to_contacts_basic_shape(tmp_path):
         "company": "Acme Inc",
         "position": "Senior PM at Acme Inc",
         "connected_on": "01 Jan 2023",
+        "url": None,
+        "email": None,
     }
 
 
@@ -115,7 +122,7 @@ def test_connections_to_contacts_returns_list_of_dicts(tmp_path):
 
     assert isinstance(contacts, list)
     assert all(isinstance(c, dict) for c in contacts)
-    expected_keys = {"first_name", "last_name", "company", "position", "connected_on"}
+    expected_keys = {"first_name", "last_name", "company", "position", "connected_on", "url", "email"}
     assert all(set(c.keys()) == expected_keys for c in contacts)
 
 
@@ -188,6 +195,49 @@ def test_connections_to_contacts_required_fields_are_never_none(tmp_path):
         assert isinstance(c["first_name"], str)
         assert isinstance(c["last_name"], str)
         assert isinstance(c["company"], str)
+
+
+def test_connections_to_contacts_includes_url_and_email(tmp_path):
+    path = tmp_path / "with_url_email.csv"
+    path.write_text(WITH_URL_EMAIL_CSV, encoding="utf-8")
+    df = read_connections(path)
+
+    contacts = connections_to_contacts(df)
+
+    assert len(contacts) == 1
+    assert contacts[0]["url"] == "https://linkedin.com/in/avanguyen"
+    assert contacts[0]["email"] == "ava@example.com"
+
+
+def test_connections_to_contacts_missing_url_email_columns_is_none(tmp_path):
+    # NORMAL_CSV has no URL / Email Address columns at all.
+    path = tmp_path / "normal.csv"
+    path.write_text(NORMAL_CSV, encoding="utf-8")
+    df = read_connections(path)
+
+    contacts = connections_to_contacts(df)
+
+    for c in contacts:
+        assert "url" in c
+        assert "email" in c
+        assert c["url"] is None
+        assert c["email"] is None
+
+
+def test_connections_to_contacts_blank_url_email_cells_are_none_not_nan(tmp_path):
+    csv_text = (
+        "First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        "Zoe,Park,,,Acme Inc,PM at Acme Inc,01 Jan 2023\n"
+    )
+    path = tmp_path / "blank_url_email.csv"
+    path.write_text(csv_text, encoding="utf-8")
+    df = read_connections(path)
+
+    contacts = connections_to_contacts(df)
+
+    assert len(contacts) == 1
+    assert contacts[0]["url"] is None
+    assert contacts[0]["email"] is None
 
 
 def test_connections_to_contacts_empty_dataframe_returns_empty_list(tmp_path):

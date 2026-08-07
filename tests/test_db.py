@@ -62,9 +62,11 @@ from wrkmatch.db import (
     get_companies_with_contacts,
     get_contacts_by_company,
     get_open_postings,
+    get_setting,
     init_db,
     mark_postings_status,
     record_posting,
+    set_setting,
     start_scan,
     upsert_company,
     upsert_contacts,
@@ -159,6 +161,91 @@ def test_upsert_contacts_stores_all_fields(db_conn):
         "SELECT first_name, last_name, company, position, connected_on, source FROM contacts"
     ).fetchone()
     assert tuple(row) == ("Jane", "Doe", "Acme Widgets", "Product Manager", "01 Jan 2023", "leon")
+
+
+# --- upsert_contacts: url/email/rating (schema v2) --------------------------
+
+def test_upsert_contacts_stores_url_and_email(db_conn):
+    contact = make_contact()
+    contact["url"] = "https://linkedin.com/in/janedoe"
+    contact["email"] = "jane@example.com"
+    upsert_contacts(db_conn, [contact], source="leon")
+
+    row = db_conn.execute("SELECT url, email FROM contacts").fetchone()
+    assert tuple(row) == ("https://linkedin.com/in/janedoe", "jane@example.com")
+
+
+def test_upsert_contacts_url_and_email_default_to_none(db_conn):
+    upsert_contacts(db_conn, [make_contact()], source="leon")
+    row = db_conn.execute("SELECT url, email FROM contacts").fetchone()
+    assert tuple(row) == (None, None)
+
+
+def test_upsert_contacts_default_rating_is_ok(db_conn):
+    upsert_contacts(db_conn, [make_contact()], source="leon")
+    row = db_conn.execute("SELECT rating FROM contacts").fetchone()
+    assert row[0] == "ok"
+
+
+def test_upsert_contacts_backfills_null_url_and_email_on_reupsert(db_conn):
+    upsert_contacts(db_conn, [make_contact()], source="leon")  # no url/email yet
+
+    contact_with_details = make_contact()
+    contact_with_details["url"] = "https://linkedin.com/in/janedoe"
+    contact_with_details["email"] = "jane@example.com"
+    n = upsert_contacts(db_conn, [contact_with_details], source="leon")
+
+    assert n == 0  # dupe, not a new row
+    assert count_rows(db_conn, "contacts") == 1
+    row = db_conn.execute("SELECT url, email FROM contacts").fetchone()
+    assert tuple(row) == ("https://linkedin.com/in/janedoe", "jane@example.com")
+
+
+def test_upsert_contacts_does_not_clobber_existing_non_null_url(db_conn):
+    contact = make_contact()
+    contact["url"] = "https://linkedin.com/in/janedoe-original"
+    upsert_contacts(db_conn, [contact], source="leon")
+
+    contact_new_url = make_contact()
+    contact_new_url["url"] = "https://linkedin.com/in/janedoe-changed"
+    upsert_contacts(db_conn, [contact_new_url], source="leon")
+
+    row = db_conn.execute("SELECT url FROM contacts").fetchone()
+    assert row[0] == "https://linkedin.com/in/janedoe-original"
+
+
+def test_upsert_contacts_does_not_clobber_existing_non_null_email(db_conn):
+    contact = make_contact()
+    contact["email"] = "jane-original@example.com"
+    upsert_contacts(db_conn, [contact], source="leon")
+
+    contact_new_email = make_contact()
+    contact_new_email["email"] = "jane-changed@example.com"
+    upsert_contacts(db_conn, [contact_new_email], source="leon")
+
+    row = db_conn.execute("SELECT email FROM contacts").fetchone()
+    assert row[0] == "jane-original@example.com"
+
+
+# --- settings ----------------------------------------------------------------
+
+def test_set_and_get_setting_roundtrip(db_conn):
+    set_setting(db_conn, "last_scan_at", "2024-01-01T00:00:00+00:00")
+    assert get_setting(db_conn, "last_scan_at") == "2024-01-01T00:00:00+00:00"
+
+
+def test_get_setting_returns_none_when_missing_by_default(db_conn):
+    assert get_setting(db_conn, "nonexistent") is None
+
+
+def test_get_setting_returns_given_default_when_missing(db_conn):
+    assert get_setting(db_conn, "nonexistent", default="fallback") == "fallback"
+
+
+def test_set_setting_repeat_call_overwrites_existing_value(db_conn):
+    set_setting(db_conn, "key", "v1")
+    set_setting(db_conn, "key", "v2")
+    assert get_setting(db_conn, "key") == "v2"
 
 
 # --- upsert_company --------------------------------------------------------
