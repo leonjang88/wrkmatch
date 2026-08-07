@@ -52,6 +52,7 @@ PM_TITLES = [
     "Director of Product Management",
     "Head of Product",
     "VP of Product",
+    "Director of Product",
     "Director, Product Management",
     "Product Management Lead",
     "Product Owner",
@@ -68,6 +69,10 @@ NON_PM_TITLES = [
     "Software Engineer, Product",
     "Product Support Specialist",
     "Manager, Production Engineering",
+    "Director of Product Marketing",
+    "Associate Director of Product Marketing, ICHRA",
+    "VP of Product Design",
+    "Head of Product Marketing",
 ]
 
 

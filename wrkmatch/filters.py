@@ -9,8 +9,8 @@ _PM_PATTERNS = [
     re.compile(r'\bproduct\s+manager\b', re.IGNORECASE),
     re.compile(r'\bproduct\s+owner\b', re.IGNORECASE),
     re.compile(r'\bproduct\s+management\s+lead\b', re.IGNORECASE),
-    re.compile(r'\bhead\s+of\s+product\b', re.IGNORECASE),
-    re.compile(r'\b(director|vp)\s+of\s+product\b', re.IGNORECASE),
+    re.compile(r'\bhead\s+of\s+product(?!\s+(marketing|design))\b', re.IGNORECASE),
+    re.compile(r'\b(director|vp)\s+of\s+product(?!\s+(marketing|design))\b', re.IGNORECASE),
     re.compile(r'\b(director|vp)\s*,\s*product\s+management\b', re.IGNORECASE),
 ]
 
